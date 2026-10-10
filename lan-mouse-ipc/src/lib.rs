@@ -187,6 +187,15 @@ pub struct ClientState {
     pub peer_commit: Option<[u8; 8]>,
 }
 
+#[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
+pub struct DiscoveredDevice {
+    pub name: String,
+    pub ips: Vec<IpAddr>,
+    pub port: u16,
+    pub fingerprint: String,
+    pub configured: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FrontendEvent {
     /// a client was created
@@ -226,6 +235,8 @@ pub enum FrontendEvent {
     IncomingDisconnected(SocketAddr),
     /// failed connection attempt (approval for fingerprint required)
     ConnectionAttempt { fingerprint: String },
+    /// devices discovered on the local network
+    Discovered(Vec<DiscoveredDevice>),
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
@@ -266,6 +277,10 @@ pub enum FrontendRequest {
     UpdateLeaveHook(u64, Option<String>),
     /// save config file
     SaveConfiguration,
+    /// request the list of discovered devices
+    Discover,
+    /// add the discovered device with the given fingerprint as client and activate it
+    ConnectDiscovered(String, Position),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]

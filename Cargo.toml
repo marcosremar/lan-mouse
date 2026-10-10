@@ -51,6 +51,7 @@ tokio = { version = "1.32.0", features = [
     "rt",
     "sync",
     "signal",
+    "time",
 ] }
 futures = "0.3.28"
 clap = { version = "4.4.11", features = ["derive"] }
@@ -67,6 +68,8 @@ rustls = { version = "0.23.12", default-features = false, features = [
 rcgen = "0.13.1"
 sha2 = "0.10.8"
 notify = "8.2.0"
+mdns-sd = "0.21.5"
+gethostname = "1.1.0"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.148"

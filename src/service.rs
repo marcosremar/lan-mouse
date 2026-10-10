@@ -4,14 +4,15 @@ use crate::{
     config::{Config, ConfigClient},
     connect::LanMouseConnection,
     crypto,
+    discovery::{Discovery, follow_target, is_configured},
     dns::{DnsEvent, DnsResolver},
     emulation::{Emulation, EmulationEvent},
     listen::{LanMouseListener, ListenerCreationError},
 };
 use futures::StreamExt;
 use lan_mouse_ipc::{
-    AsyncFrontendListener, ClientHandle, FrontendEvent, FrontendRequest, IpcError,
-    IpcListenerCreationError, Position, Status,
+    AsyncFrontendListener, ClientConfig, ClientHandle, DiscoveredDevice, FrontendEvent,
+    FrontendRequest, IpcError, IpcListenerCreationError, Position, Status,
 };
 use log;
 use std::{
@@ -19,6 +20,7 @@ use std::{
     io,
     net::{IpAddr, SocketAddr},
     sync::{Arc, RwLock},
+    time::Duration,
 };
 use thiserror::Error;
 use tokio::{process::Command, signal, sync::Notify};
@@ -44,6 +46,8 @@ pub struct Service {
     emulation: Emulation,
     /// dns resolver
     resolver: DnsResolver,
+    /// mdns device discovery
+    discovery: Option<Discovery>,
     /// frontend listener
     frontend_listener: AsyncFrontendListener,
     /// authorized public key sha256 fingerprints
@@ -106,8 +110,12 @@ impl Service {
         let resolver = DnsResolver::new()?;
 
         let port = config.port();
+        let discovery = Discovery::new(public_key_fingerprint.clone(), port)
+            .inspect_err(|e| log::warn!("device discovery unavailable: {e}"))
+            .ok();
         let service = Self {
             config,
+            discovery,
             capture,
             emulation,
             frontend_listener,
@@ -140,6 +148,7 @@ impl Service {
             self.activate_client(handle);
         }
 
+        let mut reresolve = tokio::time::interval(Duration::from_secs(15));
         loop {
             tokio::select! {
                 request = self.frontend_listener.next() => self.handle_frontend_request(request),
@@ -148,6 +157,8 @@ impl Service {
                 event = self.capture.event() => self.handle_capture_event(event),
                 event = self.resolver.event() => self.handle_resolver_event(event),
                 _ = self.config.changed() => self.handle_config_change(),
+                _ = discovery_changed(&mut self.discovery) => self.handle_discovery_change(),
+                _ = reresolve.tick() => self.resolve_disconnected(),
                 r = signal::ctrl_c() => break r.expect("failed to wait for CTRL+C"),
             }
         }
@@ -218,6 +229,11 @@ impl Service {
                 self.update_leave_hook(handle, leave_hook)
             }
             FrontendRequest::SaveConfiguration => self.save_config(),
+            FrontendRequest::Discover => self.notify_discovered(),
+            FrontendRequest::ConnectDiscovered(fingerprint, pos) => {
+                self.connect_discovered(fingerprint, pos);
+                self.save_config();
+            }
         }
     }
 
@@ -303,6 +319,11 @@ impl Service {
             EmulationEvent::PortChanged(port) => match port {
                 Ok(port) => {
                     self.port = port;
+                    if let Some(discovery) = &mut self.discovery {
+                        if let Err(e) = discovery.advertise(port) {
+                            log::warn!("failed to advertise new port: {e}");
+                        }
+                    }
                     self.notify_frontend(FrontendEvent::PortChanged(port, None));
                 }
                 Err(e) => self
@@ -381,6 +402,90 @@ impl Service {
         self.broadcast_client(handle);
     }
 
+    fn client_configs(&self) -> Vec<(ClientHandle, ClientConfig)> {
+        let states = self.client_manager.get_client_states();
+        states.into_iter().map(|(h, c, _)| (h, c)).collect()
+    }
+
+    fn discovered_devices(&self) -> Vec<DiscoveredDevice> {
+        let Some(discovery) = &self.discovery else {
+            return vec![];
+        };
+        let clients = self.client_configs();
+        let mut devices = discovery.devices();
+        for device in devices.iter_mut() {
+            device.configured = is_configured(&clients, device);
+        }
+        devices
+    }
+
+    fn notify_discovered(&mut self) {
+        let devices = self.discovered_devices();
+        self.notify_frontend(FrontendEvent::Discovered(devices));
+    }
+
+    fn handle_discovery_change(&mut self) {
+        self.follow_discovered_ips();
+        self.notify_discovered();
+    }
+
+    fn follow_discovered_ips(&mut self) {
+        let authorized = self.authorized_keys.read().expect("lock").clone();
+        let mut changed = false;
+        for device in self.discovered_devices() {
+            let clients = self.client_configs();
+            let Some(handle) = follow_target(&clients, &authorized, &device) else {
+                continue;
+            };
+            log::info!(
+                "client {handle}: {} moved to {:?}, updating ips",
+                device.name,
+                device.ips
+            );
+            self.update_fix_ips(handle, device.ips);
+            self.update_port(handle, device.port);
+            self.client_manager.set_active_addr(handle, None);
+            changed = true;
+        }
+        if changed {
+            self.save_config();
+        }
+    }
+
+    fn resolve_disconnected(&mut self) {
+        for handle in self.client_manager.active_clients() {
+            if self.client_manager.active_addr(handle).is_none() {
+                self.resolve(handle);
+            }
+        }
+    }
+
+    fn connect_discovered(&mut self, fingerprint: String, pos: Position) {
+        let device = self
+            .discovered_devices()
+            .into_iter()
+            .find(|d| d.fingerprint == fingerprint);
+        let Some(device) = device.filter(|d| !d.configured) else {
+            let msg = format!("no new discovered device with fingerprint {fingerprint}");
+            return self.notify_frontend(FrontendEvent::Error(msg));
+        };
+        self.add_authorized_key(device.name.clone(), device.fingerprint);
+        let handle = self.client_manager.add_with_config(ConfigClient {
+            ips: device.ips.into_iter().collect(),
+            hostname: Some(device.name),
+            port: device.port,
+            pos,
+            active: false,
+            enter_hook: None,
+            leave_hook: None,
+        });
+        log::info!("added discovered client {handle}");
+        let (c, s) = self.client_manager.get_state(handle).unwrap();
+        self.notify_frontend(FrontendEvent::Created(handle, c, s));
+        self.activate_client(handle);
+        self.notify_discovered();
+    }
+
     fn resolve(&self, handle: ClientHandle) {
         if let Some(hostname) = self.client_manager.get_hostname(handle) {
             self.resolver.resolve(handle, hostname);
@@ -397,6 +502,7 @@ impl Service {
         ));
         let keys = self.authorized_keys.read().expect("lock").clone();
         self.notify_frontend(FrontendEvent::AuthorizedUpdated(keys));
+        self.notify_discovered();
     }
 
     const ENTER_HANDLE_BEGIN: u64 = u64::MAX / 2 + 1;
@@ -621,6 +727,13 @@ impl Service {
                 Err(e) => log::warn!("{kind} hook for client {handle} ({cmd}): {e}"),
             }
         });
+    }
+}
+
+async fn discovery_changed(discovery: &mut Option<Discovery>) {
+    match discovery {
+        Some(discovery) => discovery.changed().await,
+        None => std::future::pending().await,
     }
 }
 

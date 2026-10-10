@@ -5,8 +5,8 @@ use std::{net::IpAddr, time::Duration};
 use thiserror::Error;
 
 use lan_mouse_ipc::{
-    ClientHandle, ConnectionError, FrontendEvent, FrontendRequest, IpcError, Position,
-    connect_async,
+    AsyncFrontendEventReader, AsyncFrontendRequestWriter, ClientHandle, ConnectionError,
+    DiscoveredDevice, FrontendEvent, FrontendRequest, IpcError, Position, connect_async,
 };
 
 #[derive(Debug, Error)]
@@ -75,6 +75,27 @@ enum CliSubcommand {
     RemoveAuthorizedKey { sha256_fingerprint: String },
     /// save configuration to file
     SaveConfig,
+    /// list devices discovered on the local network
+    Discover,
+    /// add a discovered device (by name or fingerprint) as client and activate it
+    Connect {
+        device: String,
+        #[arg(long, default_value_t = Position::Left)]
+        position: Position,
+    },
+}
+
+async fn discovered(
+    rx: &mut AsyncFrontendEventReader,
+    tx: &mut AsyncFrontendRequestWriter,
+) -> Result<Vec<DiscoveredDevice>, CliError> {
+    tx.request(FrontendRequest::Discover).await?;
+    while let Some(e) = rx.next().await {
+        if let FrontendEvent::Discovered(devices) = e? {
+            return Ok(devices);
+        }
+    }
+    Ok(vec![])
 }
 
 pub async fn run(args: CliArgs) -> Result<(), CliError> {
@@ -172,6 +193,35 @@ async fn execute(cmd: CliSubcommand) -> Result<(), CliError> {
                 .await?
         }
         CliSubcommand::SaveConfig => tx.request(FrontendRequest::SaveConfiguration).await?,
+        CliSubcommand::Discover => {
+            for d in discovered(&mut rx, &mut tx).await? {
+                let DiscoveredDevice {
+                    name,
+                    ips,
+                    port,
+                    fingerprint,
+                    configured,
+                } = d;
+                println!(
+                    "{name}: {ips:?}:{port} configured: {configured}, fingerprint: {fingerprint}"
+                );
+            }
+        }
+        CliSubcommand::Connect { device, position } => {
+            let found = discovered(&mut rx, &mut tx)
+                .await?
+                .into_iter()
+                .find(|d| d.fingerprint == device || d.name.eq_ignore_ascii_case(&device));
+            let Some(found) = found else {
+                eprintln!("no discovered device `{device}`");
+                return Ok(());
+            };
+            tx.request(FrontendRequest::ConnectDiscovered(
+                found.fingerprint,
+                position,
+            ))
+            .await?
+        }
     }
     Ok(())
 }

@@ -347,6 +347,23 @@ for information on how to use a specific command.
 </details>
 
 <details>
+    <summary>Device Discovery</summary>
+
+Running instances advertise themselves on the local network via mDNS (`_lanmouse._udp.local.`).
+Discovered devices are listed in the GTK frontend ("Discovered devices") and via the cli:
+```sh
+lan-mouse cli discover
+lan-mouse cli connect <name|fingerprint> --position right
+```
+`connect` adds the device as a client, authorizes its fingerprint and activates it.
+Entering a hostname or ip address manually keeps working as before.
+
+If an authorized device whose name matches a configured client's hostname reappears with a different
+ip address, the client's ips are updated, saved to the configuration and the connection is re-established.
+
+</details>
+
+<details>
     <summary>Daemon Mode</summary>
 
 Lan Mouse can be launched in daemon mode to keep it running in the background (e.g. for use in a systemd-service).

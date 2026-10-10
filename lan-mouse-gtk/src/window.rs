@@ -11,8 +11,8 @@ use gtk::{
 };
 
 use lan_mouse_ipc::{
-    ClientConfig, ClientHandle, ClientState, DEFAULT_PORT, FrontendRequest, FrontendRequestWriter,
-    Position,
+    ClientConfig, ClientHandle, ClientState, DEFAULT_PORT, DiscoveredDevice, FrontendRequest,
+    FrontendRequestWriter, Position,
 };
 
 use crate::{
@@ -305,6 +305,42 @@ impl Window {
                 self.new_client(handle, client, state);
             }
         }
+    }
+
+    pub(super) fn update_discovered(&self, devices: Vec<DiscoveredDevice>) {
+        let list = &self.imp().discovered_list;
+        while let Some(row) = list.first_child() {
+            list.remove(&row);
+        }
+        let mut any = false;
+        for device in devices.into_iter().filter(|d| !d.configured) {
+            any = true;
+            let ips = device
+                .ips
+                .iter()
+                .map(|ip| ip.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let row = adw::ActionRow::new();
+            row.set_title(&device.name);
+            row.set_subtitle(&format!("{ips}:{}", device.port));
+            let button = gtk::Button::with_label("Connect");
+            button.set_valign(gtk::Align::Center);
+            let fingerprint = device.fingerprint;
+            button.connect_clicked(clone!(
+                #[weak(rename_to = window)]
+                self,
+                move |_| {
+                    window.request(FrontendRequest::ConnectDiscovered(
+                        fingerprint.clone(),
+                        Position::Left,
+                    ));
+                }
+            ));
+            row.add_suffix(&button);
+            list.append(&row);
+        }
+        self.imp().discovered_group.set_visible(any);
     }
 
     pub(super) fn update_port(&self, port: u16, msg: Option<String>) {

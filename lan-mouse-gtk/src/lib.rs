@@ -298,6 +298,7 @@ fn build_ui(app: &Application) {
                         window.update_client_state(handle, state);
                     }
                     FrontendEvent::NoSuchClient(_) => {}
+                    FrontendEvent::Discovered(devices) => window.update_discovered(devices),
                     FrontendEvent::Error(e) => window.show_toast(e.as_str()),
                     FrontendEvent::Enumerate(clients) => window.update_client_list(clients),
                     FrontendEvent::PortChanged(port, msg) => window.update_port(port, msg),
