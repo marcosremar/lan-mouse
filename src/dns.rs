@@ -122,6 +122,12 @@ impl DnsTask {
 /// only care about the IPs at this stage; the actual port is appended at
 /// connection time.
 async fn resolve_hostname(hostname: &str) -> io::Result<Vec<IpAddr>> {
-    let addrs = lookup_host((hostname, 0)).await?;
-    Ok(addrs.map(|sa| sa.ip()).collect())
+    match lookup_host((hostname, 0)).await {
+        Ok(addrs) => Ok(addrs.map(|sa| sa.ip()).collect()),
+        Err(_) if !hostname.contains('.') => {
+            let addrs = lookup_host((format!("{hostname}.local"), 0)).await?;
+            Ok(addrs.map(|sa| sa.ip()).collect())
+        }
+        Err(e) => Err(e),
+    }
 }
